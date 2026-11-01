@@ -1,0 +1,33 @@
+# Phase 1: CTC pre-training of the brain content encoder.
+# Recipe of the Willett et al. (2023) GRU baseline (neural_seq_decoder) with the paper's
+# window: kernel 32 bins, stride 2 (40 ms frames).
+
+data:
+  train: data/train.npz
+  val: data/test.npz          # monitoring + best-checkpoint selection, as in neural_seq_decoder
+
+encoder:
+  neural_dim: 256
+  n_classes: 40               # 39 ARPAbet phonemes + SIL; with the CTC blank -> 41 outputs (d_bc)
+  hidden_dim: 1024
+  layer_dim: 5
+  n_days: 24                  # one session embedding per recording session
+  dropout: 0.4
+  kernel_len: 32
+  stride_len: 2
+  gaussian_smooth_width: 2.0
+  bidirectional: true
+
+train:
+  n_batches: 200000
+  batch_size: 16
+  lr_start: 0.02
+  lr_end: 0.02
+  adam_eps: 0.1
+  l2_decay: 1.0e-5
+  white_noise_sd: 0.8         # augmentation: per-bin Gaussian noise
+  constant_offset_sd: 0.2     # augmentation: per-utterance channel offsets
+  eval_every: 100
+  seed: 0
+
+output_dir: checkpoints/phase1

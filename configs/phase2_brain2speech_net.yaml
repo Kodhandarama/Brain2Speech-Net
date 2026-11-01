@@ -1,0 +1,41 @@
+# Phase 2: deep-HMM alignment to VITS CPRs with joint fine-tuning of the brain content encoder.
+# Values follow Section 5 ("Model and training details") of the paper.
+
+data:
+  train: data/train.npz       # all 8,800 utterances of the official training split
+  val: data/test.npz          # monitoring only (teacher-forced CPR MSE); the final model is last.pt
+  val_from_train: 0           # >0: instead hold out this many training utterances (seed below) as val
+
+encoder_init: checkpoints/phase1/content_encoder.pt   # Phase 1 output
+
+aligner:
+  d_frame: 256                # brain frame embedding d_f
+  d_cpr: 192                  # VITS text-encoder width
+  d_emit: 192                 # emission space d_state
+  d_state_emb: 128            # state embeddings v_k
+  max_states: 512             # K_max: size of the state / prototype tables
+  max_segments: null          # segment count classes; null = longest CPR sequence in train + val
+  clamp_eps: 1.0e-3           # transition probability floor
+
+prototypes:
+  kmeans_init: true           # P initialised by k-means on {W_tgt z_k} (k = K_max)
+  n_init: 10                  # k-means restarts
+  recluster_every: 5          # epochs; 0 disables re-clustering
+  max_points: null            # optional random subsample of CPR segments for k-means (null = all)
+
+train:
+  epochs: 1000
+  batch_size: 32
+  lr: 1.0e-3                  # aligner, PPSP, segment count predictor, CTC head
+  encoder_lr: 1.0e-5          # brain content encoder fine-tuning
+  warmup_steps: 500           # linear warm-up, then cosine decay to 0
+  lambda_ctc: 0.1
+  grad_clip: 1.0
+  amp_bf16: true              # bf16 autocast on CUDA (the HMM recursion always runs in fp32)
+  num_workers: 2
+  seed: 42
+  log_every: 50
+  val_every: 5                # epochs
+  save_every: 5               # epochs (last.pt is written every epoch)
+
+output_dir: checkpoints/phase2

@@ -1,0 +1,8 @@
+# Objective evaluation (WER / PER / MCD)
+openai-whisper
+transformers
+torchaudio
+librosa
+pyworld
+pysptk
+fastdtw

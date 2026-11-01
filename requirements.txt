@@ -1,0 +1,11 @@
+# Core: training + inference (Python >= 3.9). Install PyTorch for your platform first: https://pytorch.org
+torch>=1.13
+numpy
+scipy
+scikit-learn
+pyyaml
+tqdm
+# Text side (data preparation / CPR targets): also needs the espeak-ng system package
+g2p_en
+phonemizer
+Unidecode
