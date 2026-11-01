@@ -1,6 +1,7 @@
 # Phase 1: CTC pre-training of the brain content encoder.
 # Recipe of the Willett et al. (2023) GRU baseline (neural_seq_decoder) with the paper's
-# window: kernel 32 bins, stride 2 (40 ms frames).
+# window: kernel 32 bins, stride 2 (40 ms frames). Values are those of the encoder that
+# initialised the released model.
 
 data:
   train: data/train.npz
@@ -19,7 +20,7 @@ encoder:
   bidirectional: true
 
 train:
-  n_batches: 200000
+  n_batches: 20000
   batch_size: 16
   lr_start: 0.02
   lr_end: 0.02

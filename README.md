@@ -43,7 +43,7 @@ faster than real time.
 | **Deep-HMM aligner** | Left-to-right, no-skip HMM whose states are CPR *segment positions*. Emissions log E_i(k) = −‖A e_i − c_k‖², with c_k = W_tgt z_k during training and learned emission prototypes c_k = P[k] at inference. Transitions (stay / advance / stop) come from a neural network h_θ(e_i, v_k). Forward–backward gives soft alignments γ_{i,k}. | [`aligner.py`](brain2speech_net/aligner.py) |
 | **Posterior pooling and segment prediction (PPSP)** | γ-weighted pooling of the frame embeddings into N segments, then a segment head, a 4-layer Transformer and a residual refinement MLP predict the CPRs ẑ. | [`aligner.py`](brain2speech_net/aligner.py) |
 | **Segment count predictor** | Predicts N (cross-entropy) from an attention-pooled summary of the phoneme-aware frames; sets the number of HMM states at inference. | [`aligner.py`](brain2speech_net/aligner.py) |
-| **Phase 2** | Train aligner + PPSP with the CPR MSE loss and fine-tune the encoder (lr 1e-5) with an auxiliary CTC loss (λ = 0.1). The CTC and segment-count losses are optimised independently of the alignment objective. | [`scripts/train_phase2.py`](scripts/train_phase2.py) |
+| **Phase 2** | Train aligner + PPSP with the CPR MSE loss and fine-tune the encoder (lr 1e-5) with an auxiliary CTC loss (λ = 0.3). The CTC and segment-count losses are optimised independently of the alignment objective. | [`scripts/train_phase2.py`](scripts/train_phase2.py) |
 | **Frozen VITS** | Its text encoder provides the CPR targets z ∈ R^{192×N} during training. At inference its projection, duration predictor, flow and decoder turn predicted CPRs into a 22.05 kHz waveform. | [`tts.py`](brain2speech_net/tts.py) |
 
 At inference the path is **neural features → encoder → deep-HMM/PPSP → CPRs → VITS → waveform**. No transcript,
@@ -63,8 +63,9 @@ Open set: the official test split of Willett et al. (2023), 880 utterances never
 
 Ground-truth (pseudo-target) speech: WER 0.025.
 
-Training fit: 880 training utterances sampled uniformly across sessions, all seen during optimisation
-(Table 2 of the paper; the exact list is [`splits/seen880.tsv`](splits/seen880.tsv)).
+Training fit: 880 utterances of the training split, sampled uniformly across sessions (Table 2 of the
+paper; the exact list is [`splits/seen880.tsv`](splits/seen880.tsv)). 866 of them were used for training
+and 14 fall in the 80-utterance validation set.
 
 | Model | Text WER ↓ | PER ↓ | WER ↓ | MCD ↓ | RTF ↓ |
 |---|---|---|---|---|---|
@@ -109,7 +110,10 @@ python -m pytest tests
 |---|---|---|
 | Intracortical dataset of Willett et al. (2023): `competitionData.tar.gz` (3.7 GB) | [Dryad, doi:10.5061/dryad.x69p8czpq](https://datadryad.org/stash/dataset/doi:10.5061/dryad.x69p8czpq) | anywhere, e.g. `raw/competitionData/` |
 | Pretrained VITS (LJSpeech): `pretrained_ljs.pth` | [VITS pretrained models](https://drive.google.com/drive/folders/1ksarh-cJf3F5eKJjLVWY0X1j1qsQqiS2?usp=sharing) from [jaywalnut310/vits](https://github.com/jaywalnut310/vits) | `pretrained/pretrained_ljs.pth` |
-| Pretrained Brain2Speech-Net: `brain2speech_net_t12.pt` | [Releases page](../../releases) of this repository | `pretrained/brain2speech_net_t12.pt` |
+| Pretrained Brain2Speech-Net: `brain2speech_net_t12.pt` (559 MB, the model behind the reported numbers) | [Release v1.0](../../releases/tag/v1.0) of this repository | `pretrained/brain2speech_net_t12.pt` |
+
+SHA-256 of `brain2speech_net_t12.pt`: `ef9ef00072089d1bdeb9e5cbce20d6b86179b84210d56884c552334191653974`.
+With the GitHub CLI: `gh release download v1.0 -R Kodhandarama/Brain2Speech-Net -D pretrained`.
 
 Then build the model inputs:
 
@@ -215,13 +219,14 @@ python scripts/train_phase2.py --config configs/phase2_brain2speech_net.yaml
 # -> checkpoints/phase2/last.pt (every epoch), epoch_XXXX.pt (every 5 epochs), brain2speech_net.pt (final)
 ```
 
-Main settings ([`configs/phase2_brain2speech_net.yaml`](configs/phase2_brain2speech_net.yaml)): Adam,
-batch size 32, peak learning rate 1e-3 (1e-5 for the encoder), 500 warm-up steps followed by cosine
-decay, λ_CTC = 0.1, 1000 epochs, emission prototypes P ∈ R^{512×192} initialised by k-means
-(10 restarts) on projected training CPRs and re-clustered every 5 epochs. Training uses all 8,800
-utterances of the official training split. The official test split is evaluated with the
-teacher-forced CPR loss for monitoring only, and the final model is the last checkpoint.
-Use `data.val_from_train=N` to monitor on N held-out training utterances instead.
+The configs reproduce the training run behind the reported numbers. Main settings
+([`configs/phase2_brain2speech_net.yaml`](configs/phase2_brain2speech_net.yaml)): Adam, batch size 32,
+peak learning rate 1e-3 (1e-5 for the encoder), 500 warm-up steps followed by cosine decay over 1000
+scheduled epochs, λ_CTC = 0.3, emission prototypes P ∈ R^{512×192} initialised by k-means (10 restarts)
+on projected training CPRs and re-clustered every 5 epochs. A seed-42 permutation of the 8,800
+training utterances gives 8,720 for training and 80 for validation (teacher-forced CPR loss, monitoring
+only). The released model is the checkpoint after **285** epochs, where that run stopped; with these
+configs it corresponds to `checkpoints/phase2/epoch_0285.pt`.
 
 Useful options:
 
@@ -266,6 +271,12 @@ Brain2Speech-Net/
 
 ## Reproducibility notes
 
+- **Released model vs. reported numbers.** With this code, the released checkpoint regenerates the audio
+  the paper was evaluated on: predicted segment counts are identical, and waveforms match to a correlation
+  of at least 0.995 (open set) and 1.000 (training-fit set) on the utterances we compared. Remaining
+  differences are floating-point (hardware and PyTorch version).
+- **Settings that differ from the paper text.** Configs and the released model follow the run behind the
+  reported numbers: λ_CTC = 0.3 (the paper states 0.1), and 80 training utterances held out for validation.
 - **Text processing versions.** CPR targets and reference speech depend on the grapheme-to-phoneme
   stack. Our environment had Python 3.9, PyTorch 1.13.1, g2p-en 2.1.0, and phonemizer 2.2.1 alongside
   phonemizer-fork 3.3.2. With

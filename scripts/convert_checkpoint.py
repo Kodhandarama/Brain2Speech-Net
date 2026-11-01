@@ -51,7 +51,8 @@ def main():
     model.aligner.load_state_dict(aligner_state)  # strict: fails loudly on any architecture mismatch
     model.ctc_head.load_state_dict(ckpt["ctc_head"])
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    model.save(args.out, source={"encoder_dir": args.encoder_dir, "aligner_checkpoint": args.aligner_checkpoint,
+    # provenance without local paths: run directory name, epoch and step only
+    model.save(args.out, source={"run": os.path.basename(os.path.normpath(args.encoder_dir)),
                                  "epoch": ckpt.get("epoch"), "global_step": ckpt.get("global_step")})
     n_params = sum(p.numel() for p in model.parameters())
     print(f"saved {args.out}: {n_params / 1e6:.1f} M parameters, aligner config {aligner_cfg}, epoch {ckpt.get('epoch')}")

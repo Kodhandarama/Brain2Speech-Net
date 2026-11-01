@@ -96,9 +96,10 @@ def main():
     full_train = Brain2SpeechDataset(cfg["data"]["train"])
     n_hold = int(cfg["data"].get("val_from_train") or 0)
     if n_hold > 0:
-        perm = np.random.default_rng(tcfg["seed"]).permutation(len(full_train))
-        train_ds, val_ds = Subset(full_train, perm[n_hold:].tolist()), Subset(full_train, perm[:n_hold].tolist())
-        train_idx = perm[n_hold:].tolist()
+        # seeded permutation of the training split: first N - n_hold train, last n_hold validation
+        perm = np.random.default_rng(cfg["data"].get("split_seed", 42)).permutation(len(full_train))
+        train_idx, val_idx = perm[: len(full_train) - n_hold].tolist(), perm[len(full_train) - n_hold:].tolist()
+        train_ds, val_ds = Subset(full_train, train_idx), Subset(full_train, val_idx)
     else:
         train_ds, val_ds = full_train, Brain2SpeechDataset(cfg["data"]["val"])
         train_idx = list(range(len(full_train)))
@@ -216,13 +217,17 @@ def main():
             print(f"epoch {epoch + 1} validation  " + "  ".join(f"{k} {v:.4f}" for k, v in val.items()), flush=True)
             if wandb:
                 wandb.log({f"val/{k}": v for k, v in val.items()}, step=step)
-        if pcfg.get("recluster_every") and (epoch + 1) % pcfg["recluster_every"] == 0:
-            init_prototypes_kmeans(model.aligner, subsample(train_cprs, pcfg, seed=epoch), n_init=pcfg["n_init"])
         save(os.path.join(out_dir, "last.pt"), epoch)
         if (epoch + 1) % tcfg["save_every"] == 0:
             save(os.path.join(out_dir, f"epoch_{epoch + 1:04d}.pt"), epoch)
+        # prototypes are re-clustered after the checkpoints of this epoch are written
+        if pcfg.get("recluster_every") and (epoch + 1) % pcfg["recluster_every"] == 0:
+            init_prototypes_kmeans(model.aligner, subsample(train_cprs, pcfg, seed=epoch), n_init=pcfg["n_init"])
         print(f"epoch {epoch + 1} done in {time.time() - t0:.0f} s", flush=True)
 
+    # final export with prototypes clustered on the final W_tgt
+    if pcfg.get("recluster_every") and tcfg["epochs"] % pcfg["recluster_every"] != 0:
+        init_prototypes_kmeans(model.aligner, subsample(train_cprs, pcfg, seed=tcfg["epochs"]), n_init=pcfg["n_init"])
     model.save(os.path.join(out_dir, "brain2speech_net.pt"))
     print(f"saved final model to {out_dir}/brain2speech_net.pt")
 
