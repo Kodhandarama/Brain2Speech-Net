@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brain2speech-net"
-version = "1.0.0"
+version = "2.0.0"
 description = "Brain2Speech-Net: fast and intelligible brain-to-speech synthesis without text decoding"
 readme = "README.md"
 license = { text = "MIT" }

@@ -70,9 +70,23 @@ class PretrainedVITS:
         self.model.load_state_dict(own)
         if missing:
             print(f"[vits] {len(missing)} parameters not in checkpoint (kept at init): {missing[:5]}...")
+        self._fold_weight_norm()
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad_(False)
+
+    def _fold_weight_norm(self) -> None:
+        """Bake weight normalisation into the decoder and flow convolutions once, instead of
+        recomputing the weights on every call. VITS is frozen, so outputs are bit-identical."""
+        from torch.nn.utils import remove_weight_norm
+
+        for layer in self.model.dec.ups:
+            remove_weight_norm(layer)
+        for block in self.model.dec.resblocks:
+            block.remove_weight_norm()
+        for flow in self.model.flow.flows:
+            if hasattr(flow, "enc"):
+                flow.enc.remove_weight_norm()
 
     @property
     def sampling_rate(self) -> int:

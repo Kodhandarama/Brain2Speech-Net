@@ -215,10 +215,12 @@ class DeepHMMAligner(nn.Module):
             z = torch.zeros((B, 0, K_max), device=device, dtype=dtype)
             return z, z
         v = self.state_emb(torch.arange(K_max, device=device))
-        e_rep = e[:, :-1, :].unsqueeze(2).expand(B, T_max - 1, K_max, self.d_frame)
-        v_rep = v.view(1, 1, K_max, -1).expand(B, T_max - 1, K_max, self.d_state_emb)
-        inp = torch.cat([e_rep, v_rep], dim=-1)
-        logits2 = self.trans_net(inp.reshape(-1, inp.shape[-1])).view(B, T_max - 1, K_max, 2)
+        # First layer on [e_i; v_k] split as W_e e_i + W_v v_k + b: one product per frame and per
+        # state instead of one per (frame, state) pair.
+        lin1 = self.trans_net[0]
+        h_e = F.linear(e[:, :-1, :], lin1.weight[:, : self.d_frame], lin1.bias)
+        h_v = F.linear(v, lin1.weight[:, self.d_frame:])
+        logits2 = self.trans_net[1:](h_e.unsqueeze(2) + h_v.view(1, 1, K_max, -1))
         logits3 = torch.cat([logits2, torch.zeros(B, T_max - 1, K_max, 1, device=device, dtype=logits2.dtype)], dim=-1)
         probs3 = F.softmax(logits3, dim=-1)
         tau_adv_raw, tau_stop_raw = probs3[..., 0], probs3[..., 1]
@@ -249,15 +251,15 @@ class DeepHMMAligner(nn.Module):
         B, T_max, Kp1 = log_emit.shape
         K_max = Kp1 - 1
         EOS = K_max
-        neg_inf = torch.tensor(NEG_INF, device=device, dtype=dtype)
+        neg_inf = torch.full((), NEG_INF, device=device, dtype=dtype)
         eps = self.clamp_eps
 
         log_stay = torch.log((1.0 - tau_adv - tau_stop).clamp(eps, 1.0 - eps))
         log_adv = torch.log(tau_adv.clamp_min(eps))
         log_stop = torch.log(tau_stop.clamp_min(eps))
         # EOS can only be entered from the final segment N-1
-        allow_stop = torch.zeros((B, K_max), device=device, dtype=torch.bool)
-        allow_stop[torch.arange(B, device=device), (n_seg.clamp(max=K_max).long() - 1).clamp(min=0)] = True
+        last = (n_seg.clamp(max=K_max).long() - 1).clamp(min=0)
+        allow_stop = torch.arange(K_max, device=device)[None, :] == last[:, None]
         log_stop = torch.where(allow_stop.unsqueeze(1).expand_as(log_stop), log_stop, neg_inf)
         reach = self._reachability_mask(T_max, K_max, lengths_T, n_seg, device)
         time_pad = torch.arange(T_max, device=device)[None, :] >= lengths_T[:, None]
@@ -343,7 +345,19 @@ class DeepHMMAligner(nn.Module):
             K_max = int(n_segments.max().item())
         K_max = min(K_max, self.max_states)
         n_seg = n_segments.clamp(max=K_max).long()
+        cpr_pred, gamma, log_z = self.predict_segments(e, lengths, n_seg, K_max, cpr)
+        return AlignerOutput(cpr=cpr_pred, n_segments=n_seg, seg_count_logits=seg_count_logits, gamma=gamma, log_z=log_z)
 
+    def predict_segments(
+        self, e: torch.Tensor, lengths: torch.Tensor, n_seg: torch.Tensor, K_max: int, cpr: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """HMM alignment, posterior pooling and PPSP for frame embeddings e (B, I, d_frame).
+
+        Shapes depend only on (I, K_max), with no host synchronisation, so the call can be
+        captured in a CUDA graph (see :mod:`brain2speech_net.cuda_graphs`).
+        Returns predicted CPRs (B, d_cpr, K_max), posteriors gamma (B, I, K_max) and log Z (B,).
+        """
+        device = e.device
         log_emit = self._emissions(e, K_max, cpr, n_seg, lengths)
         tau_adv, tau_stop = self._transitions(e, K_max, n_seg)
         # The forward-backward recursion runs in float32: bf16 error accumulates over I steps.
@@ -365,7 +379,7 @@ class DeepHMMAligner(nn.Module):
         cpr_pred = z.transpose(1, 2).masked_fill(seg_padding.unsqueeze(1), 0.0)
         if cpr is not None and cpr_pred.shape[2] < cpr.shape[2]:
             cpr_pred = F.pad(cpr_pred, (0, cpr.shape[2] - cpr_pred.shape[2]))
-        return AlignerOutput(cpr=cpr_pred, n_segments=n_seg, seg_count_logits=seg_count_logits, gamma=gamma, log_z=log_z)
+        return cpr_pred, gamma, log_z
 
 
 # ---------------------------------------------------------------------- losses / prototypes

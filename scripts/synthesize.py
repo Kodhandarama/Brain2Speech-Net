@@ -11,6 +11,8 @@ Open set (official test split, Table 1):
         --vits_checkpoint pretrained/pretrained_ljs.pth --data data/test.npz --out_dir outputs/open_set
 Training fit (880 seen utterances, Table 2):
     python scripts/synthesize.py ... --data data/train.npz --subset splits/seen880.tsv --out_dir outputs/seen880
+GPU with the aligner replayed as CUDA graphs (same outputs, lower RTF):
+    python scripts/synthesize.py ... --device cuda --cuda_graphs
 """
 import argparse
 import csv
@@ -37,6 +39,7 @@ def main():
     ap.add_argument("--subset", default=None, help="optional (session, trial) TSV, e.g. splits/seen880.tsv")
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--device", default="cpu", help="the paper's RTFs were measured on CPU")
+    ap.add_argument("--cuda_graphs", action="store_true", help="replay the aligner as CUDA graphs (needs --device cuda)")
     ap.add_argument("--threads", type=int, default=None, help="torch CPU threads (default: all cores)")
     ap.add_argument("--max_utterances", type=int, default=None)
     ap.add_argument("--oracle_length", action="store_true", help="use the true segment count N (diagnostic only)")
@@ -46,8 +49,17 @@ def main():
     args = ap.parse_args()
     if args.threads:
         torch.set_num_threads(args.threads)
+    cuda = args.device.startswith("cuda")
+    if cuda:  # full float32 (no TF32), so GPU outputs match the CPU model
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
 
     model = Brain2SpeechNet.from_pretrained(args.checkpoint).to(args.device)
+    predictor = model
+    if args.cuda_graphs:
+        from brain2speech_net.cuda_graphs import GraphedBrain2Speech
+
+        predictor = GraphedBrain2Speech(model)
     vits = PretrainedVITS(args.vits_checkpoint, args.vits_config, device=args.device)
     ds = Brain2SpeechDataset(args.data, require_cpr=args.oracle_length, subset=read_subset(args.subset) if args.subset else None)
     n = len(ds) if args.max_utterances is None else min(len(ds), args.max_utterances)
@@ -55,13 +67,18 @@ def main():
 
     rows = []
     with torch.inference_mode():
+        if cuda:  # CUDA context and cuDNN / cuBLAS initialisation stay out of the timings
+            it = ds[0]
+            vits.cpr_to_speech(predictor.predict_cpr(it["neural"], it["day_idx"]), args.noise_scale, args.noise_scale_w)
         for i in tqdm(range(n), desc="synthesising"):
             it = ds[i]
             n_true = int(it["cpr"].shape[0]) if "cpr" in it else None
+            captured = getattr(predictor, "capture_seconds", 0.0)
             t0 = time.perf_counter()
-            cpr = model.predict_cpr(it["neural"], it["day_idx"], n_segments=n_true if args.oracle_length else None)
+            cpr = predictor.predict_cpr(it["neural"], it["day_idx"], n_segments=n_true if args.oracle_length else None)
             wav = vits.cpr_to_speech(cpr, args.noise_scale, args.noise_scale_w, args.length_scale)
-            elapsed = time.perf_counter() - t0
+            # a CUDA graph captured for a new bucket is a one-off cost, reported in the summary
+            elapsed = time.perf_counter() - t0 - (getattr(predictor, "capture_seconds", 0.0) - captured)
             dur = len(wav) / vits.sampling_rate
             name = f"{it['session']}_{it['trial']}.wav"
             save_wav(os.path.join(args.out_dir, name), wav, vits.sampling_rate)
@@ -77,7 +94,10 @@ def main():
         w.writerows(rows)
     rtfs = [r["rtf"] for r in rows if r["rtf"] != ""]
     summary = {"checkpoint": args.checkpoint, "data": args.data, "subset": args.subset, "n_utterances": len(rows),
-               "device": args.device, "threads": torch.get_num_threads(), "mean_rtf": float(np.mean(rtfs))}
+               "device": torch.cuda.get_device_name() if cuda else args.device, "threads": torch.get_num_threads(),
+               "cuda_graphs": args.cuda_graphs, "mean_rtf": float(np.mean(rtfs)), "median_rtf": float(np.median(rtfs))}
+    if args.cuda_graphs:
+        summary.update(n_graphs=predictor.n_graphs, capture_seconds=round(predictor.capture_seconds, 2))
     with open(os.path.join(args.out_dir, "synthesis_summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
     print(json.dumps(summary, indent=2))

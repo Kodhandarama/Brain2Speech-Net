@@ -83,6 +83,25 @@ def test_text_free_inference_and_roundtrip(tmp_path):
     assert torch.allclose(reloaded.predict_cpr(items[0]["neural"], items[0]["day_idx"], n_segments=7), cpr_n, atol=1e-5)
 
 
+def test_bucket_padding_leaves_cprs_unchanged():
+    """The CUDA-graph path zero-pads frames and segments to a bucket; outputs must not change."""
+    from brain2speech_net.cuda_graphs import _mha_fastpath_disabled
+
+    torch.manual_seed(0)
+    model = Brain2SpeechNet(encoder=ENC, aligner=ALN).eval()
+    items, _ = tiny_batch(B=1)
+    al, N = model.aligner, 9
+    with torch.inference_mode():
+        ref = model.predict_cpr(items[0]["neural"], items[0]["day_idx"], n_segments=N)
+        n = model.content_encoder(torch.as_tensor(items[0]["neural"])[None], torch.tensor([items[0]["day_idx"]]))
+        I = n.shape[1]
+        n_pad = torch.cat([n, torch.zeros(1, 13, n.shape[2])], dim=1)
+        with _mha_fastpath_disabled():
+            out = al.predict_segments(al.frame_enc(n_pad), torch.tensor([I]), torch.tensor([N]), ALN["max_states"])[0]
+    assert torch.allclose(out[0, :, :N], ref, atol=1e-5)
+    assert torch.all(out[0, :, N:] == 0)
+
+
 def test_phoneme_ids_roundtrip():
     phones = ["HH", "AH", "L", "OW", "SIL"]
     assert ids_to_phonemes(phonemes_to_ids(phones)) == phones

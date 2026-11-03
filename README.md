@@ -26,6 +26,7 @@ faster than real time.
 - [Installation](#installation)
 - [Data and pretrained models](#data-and-pretrained-models)
 - [Quick start: speech from neural recordings](#quick-start-speech-from-neural-recordings)
+  - [Faster inference on a GPU (CUDA graphs)](#faster-inference-on-a-gpu-cuda-graphs)
 - [Reproducing the paper](#reproducing-the-paper)
 - [Training from scratch](#training-from-scratch)
 - [Repository layout](#repository-layout)
@@ -110,10 +111,10 @@ python -m pytest tests
 |---|---|---|
 | Intracortical dataset of Willett et al. (2023): `competitionData.tar.gz` (3.7 GB) | [Dryad, doi:10.5061/dryad.x69p8czpq](https://datadryad.org/stash/dataset/doi:10.5061/dryad.x69p8czpq) | anywhere, e.g. `raw/competitionData/` |
 | Pretrained VITS (LJSpeech): `pretrained_ljs.pth` | [VITS pretrained models](https://drive.google.com/drive/folders/1ksarh-cJf3F5eKJjLVWY0X1j1qsQqiS2?usp=sharing) from [jaywalnut310/vits](https://github.com/jaywalnut310/vits) | `pretrained/pretrained_ljs.pth` |
-| Pretrained Brain2Speech-Net: `brain2speech_net_t12.pt` (559 MB, the model behind the reported numbers) | [Release v1.0](../../releases/tag/v1.0) of this repository | `pretrained/brain2speech_net_t12.pt` |
+| Pretrained Brain2Speech-Net: `brain2speech_net_t12.pt` (559 MB, the model behind the reported numbers) | [Release v2.0](../../releases/tag/v2.0) of this repository (same weights as v1.0) | `pretrained/brain2speech_net_t12.pt` |
 
 SHA-256 of `brain2speech_net_t12.pt`: `ef9ef00072089d1bdeb9e5cbce20d6b86179b84210d56884c552334191653974`.
-With the GitHub CLI: `gh release download v1.0 -R Kodhandarama/Brain2Speech-Net -D pretrained`.
+With the GitHub CLI: `gh release download v2.0 -R Kodhandarama/Brain2Speech-Net -D pretrained`.
 
 Then build the model inputs:
 
@@ -164,6 +165,42 @@ print("prompt was:", utt["transcript"])
 
 `neural` is a `(T, 256)` array of 20 ms bins and `day_idx` the recording-session index (0–23).
 
+### Faster inference on a GPU (CUDA graphs)
+
+```bash
+python scripts/synthesize.py --checkpoint pretrained/brain2speech_net_t12.pt \
+    --vits_checkpoint pretrained/pretrained_ljs.pth --data data/test.npz --out_dir outputs/open_set \
+    --device cuda --cuda_graphs
+```
+
+On a GPU, one utterance at a time, the deep-HMM aligner is limited by kernel launches rather than
+arithmetic: its forward–backward recursion issues about 10,000 tiny kernels per utterance. `--cuda_graphs`
+captures the aligner once per input-size bucket (16 encoder frames × 32 segments) and replays it
+([`brain2speech_net/cuda_graphs.py`](brain2speech_net/cuda_graphs.py); from Python,
+`GraphedBrain2Speech(model).predict_cpr(...)`). Inputs are zero-padded to the bucket, which the aligner
+already masks, so outputs do not change; the brain content encoder and VITS run as usual. Capturing the
+graphs takes 15–25 s once per run; it is excluded from the RTF and reported in `synthesis_summary.json`.
+
+RTF on one NVIDIA H100, float32, one utterance at a time, all 880 utterances of each set (mean / median):
+
+| System | Open set | Training fit |
+|---|---|---|
+| **Brain2Speech-Net, CUDA graphs** | **0.020** / 0.019 | **0.020** / 0.019 |
+| Brain2Speech-Net, without CUDA graphs | 0.036 / 0.034 | 0.036 / 0.034 |
+| NTS-Cascade (5-gram) | 0.038 / 0.032 | 0.025 / 0.023 |
+
+- **Same outputs.** Against release v1.0 (all 1,760 utterances, NVIDIA A100): identical predicted segment
+  counts for every utterance, identical audio length for 1,756 (the other four differ by one frame), and a
+  median largest per-sample difference of 1 LSB of 16-bit audio. Whisper WER is 0.4456 vs 0.4460 (open set)
+  and 0.0683 vs 0.0685 (training fit).
+- **The cascade** was timed the same way (neural input to waveform, warm-up excluded): Willett et al.'s GRU
+  phoneme decoder and VITS on the GPU, WFST decoding (beam 18) and phonemisation on the CPU, where the
+  decoder runs. WFST decoding dominates and grows with how confusable the input is (46 ms per utterance on
+  the open set, 21 ms on the training fit); the GRU takes 6 ms and VITS 24 ms. In this run its text WER was
+  0.191 / 0.014 and its speech WER 0.205 / 0.032 (open set / training fit; paper: 0.197 / 0.037 and
+  0.229 / 0.059). The cascade is not part of this repository.
+- The CPU RTFs in the results tables are unchanged: CUDA graphs only apply on a GPU.
+
 ## Reproducing the paper
 
 **Table 1, open set** (official test split):
@@ -198,7 +235,8 @@ into the generated folder. The metrics follow the paper:
   and the reference speech; mean over utterances.
 - **MCD**: WORLD mel-cepstra (order 39, α = 0.466, 5 ms shift), silent frames removed, DTW-aligned; mean over utterances.
 - **RTF**: time from neural input to waveform divided by the audio duration, single utterance at a time
-  on CPU. Absolute RTF depends on the machine.
+  on CPU. Absolute RTF depends on the machine. For GPU numbers see
+  [Faster inference on a GPU](#faster-inference-on-a-gpu-cuda-graphs).
 
 ## Training from scratch
 
@@ -256,6 +294,7 @@ Brain2Speech-Net/
 │   ├── aligner.py           brain frame encoder, deep-HMM aligner, PPSP, segment count predictor,
 │   │                        losses, k-means emission prototypes
 │   ├── model.py             Brain2SpeechNet: encoder + aligner + CTC head, save / load / predict_cpr
+│   ├── cuda_graphs.py       GPU inference with the aligner replayed as CUDA graphs
 │   ├── tts.py               frozen VITS: text -> CPR targets, CPR -> speech, pseudo-target speech
 │   ├── data.py              Willett competitionData loader, prepared-data dataset, batching
 │   ├── phonemes.py          phoneme inventory and grapheme-to-phoneme labels
@@ -286,6 +325,8 @@ Brain2Speech-Net/
 - **Phase 1 checkpoint selection** follows the `neural_seq_decoder` recipe of Willett et al. and keeps the
   encoder with the lowest greedy phoneme error on `data.val` (the official test split by default). Point
   `data.val` to a separate file to select on held-out training data instead.
+- **GPU evaluation.** Generating both sets with this code on an NVIDIA A100 in float32 gives Whisper WER
+  0.446 on the open set and 0.068 on the training fit (paper: 0.472 and 0.068).
 - **Inference settings.** The segment count is predicted, emissions use the learned prototypes, and VITS
   runs with `noise_scale = noise_scale_w = 0`, so synthesis is deterministic. `synthesize.py --oracle_length`
   uses the true segment count instead (diagnostic only; it needs the CPR targets).
